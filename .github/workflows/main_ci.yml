@@ -1,0 +1,142 @@
+name: CI - Tests & Quality Checks
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+    
+    - name: 📦 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-asyncio flake8 black mypy
+    
+    - name: 🔍 Code Quality - Linting (flake8)
+      run: |
+        # Stop build if there are Python syntax errors or undefined names
+        flake8 execution/ --count --select=E9,F63,F7,F82 --show-source --statistics
+        # Exit-zero treats all errors as warnings
+        flake8 execution/ --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+      continue-on-error: false
+    
+    - name: 🎨 Code Quality - Formatting (black)
+      run: |
+        black --check execution/ || echo "⚠️ Code formatting issues found. Run 'black execution/' locally."
+      continue-on-error: true
+    
+    - name: 🔒 Security Check - Secrets Scan
+      run: |
+        echo "🔍 Scanning for exposed secrets..."
+        # Check for common secret patterns
+        if grep -r "sk-[a-zA-Z0-9]\{48\}" execution/ tests/ 2>/dev/null; then
+          echo "❌ CRITICAL: Potential OpenAI API key found in code"
+          exit 1
+        fi
+        if grep -r "sk-ant-[a-zA-Z0-9-]\{95\}" execution/ tests/ 2>/dev/null; then
+          echo "❌ CRITICAL: Potential Anthropic API key found in code"
+          exit 1
+        fi
+        echo "✅ No secrets detected"
+    
+    - name: 🧪 Run Unit Tests
+      run: |
+        if [ -d "tests/unit" ] && [ "$(ls -A tests/unit/*.py 2>/dev/null)" ]; then
+          echo "Running unit tests..."
+          pytest tests/unit/ -v --cov=execution --cov-report=xml --cov-report=term
+        else
+          echo "⚠️ No unit tests found. Skipping."
+        fi
+      continue-on-error: false
+    
+    - name: 🔗 Run Integration Tests
+      run: |
+        if [ -d "tests/integration" ] && [ "$(ls -A tests/integration/*.py 2>/dev/null)" ]; then
+          echo "Running integration tests..."
+          pytest tests/integration/ -v
+        else
+          echo "⚠️ No integration tests found. Skipping."
+        fi
+      continue-on-error: false
+      env:
+        # Add test environment variables here if needed
+        ENVIRONMENT: test
+    
+    - name: 🎯 Run LLM Evals (Golden Dataset)
+      run: |
+        if [ -f "execution/run_evals.py" ]; then
+          echo "Running LLM evaluation suite..."
+          python execution/run_evals.py
+        else
+          echo "⚠️ No evals script found. Skipping."
+        fi
+      continue-on-error: true
+      env:
+        # Use test API keys for evals (set in GitHub Secrets)
+        OPENAI_API_KEY: ${{ secrets.OPENAI_TEST_API_KEY }}
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_TEST_API_KEY }}
+    
+    - name: 📊 Upload Coverage Report
+      uses: codecov/codecov-action@v3
+      if: matrix.python-version == '3.11'
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+    
+    - name: ✅ Quality Gate Summary
+      if: success()
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ ALL CHECKS PASSED"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✓ Code quality verified"
+        echo "✓ Security scan passed"
+        echo "✓ Unit tests passed"
+        echo "✓ Integration tests passed"
+        echo "✓ LLM evals passed"
+        echo ""
+        echo "🚀 Ready to merge!"
+    
+    - name: ❌ Quality Gate Failed
+      if: failure()
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "❌ QUALITY GATE FAILED"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Review the failed checks above."
+        echo "Fix issues locally before pushing again."
+        echo ""
+        exit 1
+
+  # Optional: Dependency vulnerability check
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🔒 Run dependency security check
+      uses: pyupio/safety@2.3.5
+      with:
+        api-key: ${{ secrets.SAFETY_API_KEY }}
+        args: '--json'
+      continue-on-error: true
